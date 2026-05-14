@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppI
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, PreCheckoutQueryHandler, CallbackQueryHandler
 
 BOT_TOKEN  = os.getenv("BOT_TOKEN", "YOUR_TOKEN_HERE")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://scillus-bit.github.io/nft-slots/nft_slots.html")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://scillus-bit.github.io/nft-slots/nft_slots52.html")
 ADMIN_ID   = int(os.getenv("ADMIN_ID", "0"))
 DB_PATH    = "nftdrops.db"
 
