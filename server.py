@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
 """
-NFT King — Flask API Server
-Синхронізує баланс між ботом і WebApp
+NFT King API Server — PostgreSQL версія
 """
-import os, asyncio, logging, aiosqlite, json
+import os, time, logging, json, hmac, hashlib
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import hashlib, hmac, time
-from threading import Thread
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-DB_PATH   = "nftking.db"
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
+BOT_SECRET = os.getenv("BOT_SECRET", "nftking2025")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ===== DB =====
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
+
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
             username TEXT DEFAULT '',
             stars INTEGER DEFAULT 0,
             coupons INTEGER DEFAULT 0,
-            referrer_id INTEGER DEFAULT NULL,
+            referrer_id BIGINT DEFAULT NULL,
             referrals INTEGER DEFAULT 0,
             cases_opened INTEGER DEFAULT 0,
             nfts_won INTEGER DEFAULT 0,
@@ -34,133 +40,139 @@ async def init_db():
             xp INTEGER DEFAULT 0,
             level INTEGER DEFAULT 1,
             created_at INTEGER DEFAULT 0
-        )""")
-        await db.execute("""CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             case_name TEXT,
             prize TEXT,
             stars_spent INTEGER DEFAULT 0,
             stars_won INTEGER DEFAULT 0,
             ts INTEGER DEFAULT 0
-        )""")
-        await db.commit()
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    result = loop.run_until_complete(coro)
-    loop.close()
-    return result
-
-async def _get_user(user_id: int, username: str = ""):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)) as c:
-            row = await c.fetchone()
-        if not row:
-            now = int(time.time())
-            await db.execute(
-                "INSERT INTO users (user_id, username, created_at) VALUES (?,?,?)",
-                (user_id, username, now)
-            )
-            await db.commit()
-            return {"user_id": user_id, "username": username, "stars": 0, "coupons": 0,
-                    "referrals": 0, "cases_opened": 0, "nfts_won": 0,
-                    "daily_last": 0, "daily_day": 0, "xp": 0, "level": 1}
-        cols = ["user_id","username","stars","coupons","referrer_id","referrals",
-                "cases_opened","nfts_won","daily_last","daily_day","xp","level","created_at"]
-        return dict(zip(cols, row))
-
-async def _update_stars(user_id: int, delta: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET stars = MAX(0, stars + ?) WHERE user_id=?", (delta, user_id))
-        await db.commit()
-
-async def _add_history(user_id, case_name, prize, spent, won):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO history (user_id, case_name, prize, stars_spent, stars_won, ts) VALUES (?,?,?,?,?,?)",
-            (user_id, case_name, prize, spent, won, int(time.time()))
         )
-        await db.execute("UPDATE users SET cases_opened=cases_opened+1, stars_spent=COALESCE(stars_spent,0)+? WHERE user_id=?", (spent, user_id))
-        await db.commit()
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("✅ Database initialized!")
 
-async def _claim_daily(user_id: int, reward: int, day: int):
+# Init on startup
+try:
+    init_db()
+except Exception as e:
+    logger.error(f"DB init error: {e}")
+
+# ===== DB HELPERS =====
+def db_get_user(user_id: int, username: str = ""):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        now = int(time.time())
+        cur.execute(
+            "INSERT INTO users (user_id, username, created_at) VALUES (%s, %s, %s) RETURNING *",
+            (user_id, username, now)
+        )
+        row = cur.fetchone()
+        conn.commit()
+    cur.close()
+    conn.close()
+    return dict(row)
+
+def db_update_stars(user_id: int, delta: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET stars = GREATEST(0, stars + %s) WHERE user_id = %s RETURNING stars",
+        (delta, user_id)
+    )
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return row["stars"] if row else 0
+
+def db_add_history(user_id, case_name, prize, spent, won):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO history (user_id, case_name, prize, stars_spent, stars_won, ts) VALUES (%s, %s, %s, %s, %s, %s)",
+        (user_id, case_name, prize, spent, won, int(time.time()))
+    )
+    cur.execute(
+        "UPDATE users SET cases_opened = cases_opened + 1 WHERE user_id = %s",
+        (user_id,)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def db_claim_daily(user_id: int, reward: int, day: int):
     now = int(time.time())
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET stars=stars+?, daily_last=?, daily_day=? WHERE user_id=?",
-            (reward, now, day, user_id)
-        )
-        await db.commit()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET stars = stars + %s, daily_last = %s, daily_day = %s WHERE user_id = %s RETURNING stars",
+        (reward, now, day, user_id)
+    )
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return row["stars"] if row else 0
 
-async def _add_referral(new_user: int, ref_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT referrer_id FROM users WHERE user_id=?", (new_user,)) as c:
-            row = await c.fetchone()
-        if row and row[0]: return False
-        await db.execute("UPDATE users SET referrer_id=? WHERE user_id=?", (ref_id, new_user))
-        await db.execute("UPDATE users SET referrals=referrals+1, coupons=coupons+1 WHERE user_id=?", (ref_id,))
-        await db.execute("UPDATE users SET coupons=coupons+1 WHERE user_id=?", (new_user,))
-        await db.commit()
-        return True
+def db_add_referral(new_user: int, ref_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT referrer_id FROM users WHERE user_id = %s", (new_user,))
+    row = cur.fetchone()
+    if row and row["referrer_id"]:
+        cur.close()
+        conn.close()
+        return False
+    cur.execute("UPDATE users SET referrer_id = %s WHERE user_id = %s", (ref_id, new_user))
+    cur.execute("UPDATE users SET referrals = referrals + 1, coupons = coupons + 1 WHERE user_id = %s", (ref_id,))
+    cur.execute("UPDATE users SET coupons = coupons + 1 WHERE user_id = %s", (new_user,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
 
-async def _use_coupon(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT coupons FROM users WHERE user_id=?", (user_id,)) as c:
-            row = await c.fetchone()
-        if not row or row[0] < 20: return False
-        await db.execute("UPDATE users SET coupons=coupons-20 WHERE user_id=?", (user_id,))
-        await db.commit()
-        return True
+def db_use_coupon(user_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT coupons FROM users WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    if not row or row["coupons"] < 20:
+        cur.close()
+        conn.close()
+        return False
+    cur.execute("UPDATE users SET coupons = coupons - 20 WHERE user_id = %s", (user_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
 
-async def _get_history(user_id: int, limit: int = 10):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT case_name, prize, stars_spent, stars_won, ts FROM history WHERE user_id=? ORDER BY ts DESC LIMIT ?",
-            (user_id, limit)
-        ) as c:
-            rows = await c.fetchall()
-    return [{"case": r[0], "prize": r[1], "spent": r[2], "won": r[3], "ts": r[4]} for r in rows]
+def db_get_history(user_id: int, limit: int = 10):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT case_name, prize, stars_spent, stars_won, ts FROM history WHERE user_id = %s ORDER BY ts DESC LIMIT %s",
+        (user_id, limit)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"case": r["case_name"], "prize": r["prize"], "spent": r["stars_spent"], "won": r["stars_won"], "ts": r["ts"]} for r in rows]
 
-# ===== TELEGRAM VALIDATION =====
-def validate_init_data(init_data: str) -> dict | None:
-    """Перевірити підпис Telegram WebApp initData"""
-    if not init_data or not BOT_TOKEN:
-        return None
-    try:
-        parsed = {}
-        pairs = [p.split("=", 1) for p in init_data.split("&")]
-        for k, v in pairs:
-            parsed[k] = v
-
-        hash_val = parsed.pop("hash", "")
-        data_check = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-        expected = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
-
-        if not hmac.compare_digest(expected, hash_val):
-            return None
-
-        user_str = parsed.get("user", "{}")
-        return json.loads(user_str)
-    except:
-        return None
-
-def get_user_from_request():
-    """Отримати user_id з запиту"""
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    user = validate_init_data(init_data)
-    if user:
-        return user.get("id"), user.get("username", "")
-    # Dev fallback
-    uid = request.json.get("user_id") if request.is_json else None
-    return uid, ""
-
-# ===== API ENDPOINTS =====
+# ===== ENDPOINTS =====
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "NFT King API"})
+    return jsonify({"status": "ok", "service": "NFT King API", "db": "postgresql"})
 
 @app.route("/api/user", methods=["POST"])
 def get_user():
@@ -169,8 +181,12 @@ def get_user():
     username = data.get("username", "")
     if not user_id:
         return jsonify({"error": "no user_id"}), 400
-    user = run_async(_get_user(int(user_id), username))
-    return jsonify(user)
+    try:
+        user = db_get_user(int(user_id), username)
+        return jsonify(user)
+    except Exception as e:
+        logger.error(f"get_user error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/open_case", methods=["POST"])
 def open_case():
@@ -186,27 +202,29 @@ def open_case():
     if not user_id:
         return jsonify({"error": "no user_id"}), 400
 
-    user = run_async(_get_user(int(user_id)))
-    if not free and user["stars"] < cost:
-        return jsonify({"error": "not_enough_stars", "stars": user["stars"]}), 400
+    try:
+        user = db_get_user(int(user_id))
+        if not free and user["stars"] < cost:
+            return jsonify({"error": "not_enough_stars", "stars": user["stars"]}), 400
 
-    # Deduct cost
-    if not free:
-        run_async(_update_stars(int(user_id), -cost))
-    # Add won stars
-    if stars_won > 0:
-        run_async(_update_stars(int(user_id), stars_won))
-    if is_nft:
-        async def _mark_nft(uid):
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("UPDATE users SET nfts_won=nfts_won+1 WHERE user_id=?", (uid,))
-                await db.commit()
-        run_async(_mark_nft(int(user_id)))
+        if not free:
+            db_update_stars(int(user_id), -cost)
+        if stars_won > 0:
+            db_update_stars(int(user_id), stars_won)
+        if is_nft:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("UPDATE users SET nfts_won = nfts_won + 1 WHERE user_id = %s", (int(user_id),))
+            conn.commit()
+            cur.close()
+            conn.close()
 
-    run_async(_add_history(int(user_id), case_name, prize, cost if not free else 0, stars_won))
-
-    user = run_async(_get_user(int(user_id)))
-    return jsonify({"success": True, "stars": user["stars"], "coupons": user["coupons"]})
+        db_add_history(int(user_id), case_name, prize, cost if not free else 0, stars_won)
+        user = db_get_user(int(user_id))
+        return jsonify({"success": True, "stars": user["stars"], "coupons": user["coupons"]})
+    except Exception as e:
+        logger.error(f"open_case error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/claim_daily", methods=["POST"])
 def claim_daily():
@@ -214,21 +232,19 @@ def claim_daily():
     user_id = data.get("user_id")
     if not user_id:
         return jsonify({"error": "no user_id"}), 400
-
-    user = run_async(_get_user(int(user_id)))
-    now = int(time.time())
-    last = user.get("daily_last", 0)
-
-    if now - last < 86400:
-        return jsonify({"error": "already_claimed", "next": last + 86400}), 400
-
-    day = (user.get("daily_day", 0) % 7) + 1
-    rewards = [1, 1, 2, 2, 3, 3, 5]
-    reward = rewards[day - 1]
-
-    run_async(_claim_daily(int(user_id), reward, day))
-    user = run_async(_get_user(int(user_id)))
-    return jsonify({"success": True, "reward": reward, "day": day, "stars": user["stars"]})
+    try:
+        user = db_get_user(int(user_id))
+        now = int(time.time())
+        if now - user.get("daily_last", 0) < 86400:
+            return jsonify({"error": "already_claimed", "next": user["daily_last"] + 86400}), 400
+        day = (user.get("daily_day", 0) % 7) + 1
+        rewards = [1, 1, 2, 2, 3, 3, 5]
+        reward = rewards[day - 1]
+        stars = db_claim_daily(int(user_id), reward, day)
+        return jsonify({"success": True, "reward": reward, "day": day, "stars": stars})
+    except Exception as e:
+        logger.error(f"claim_daily error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/referral", methods=["POST"])
 def referral():
@@ -237,8 +253,12 @@ def referral():
     ref_id = data.get("ref_id")
     if not new_user or not ref_id:
         return jsonify({"error": "missing params"}), 400
-    success = run_async(_add_referral(int(new_user), int(ref_id)))
-    return jsonify({"success": success})
+    try:
+        success = db_add_referral(int(new_user), int(ref_id))
+        return jsonify({"success": success})
+    except Exception as e:
+        logger.error(f"referral error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/use_coupon", methods=["POST"])
 def use_coupon():
@@ -246,11 +266,15 @@ def use_coupon():
     user_id = data.get("user_id")
     if not user_id:
         return jsonify({"error": "no user_id"}), 400
-    success = run_async(_use_coupon(int(user_id)))
-    if not success:
-        return jsonify({"error": "not_enough_coupons"}), 400
-    user = run_async(_get_user(int(user_id)))
-    return jsonify({"success": True, "coupons": user["coupons"]})
+    try:
+        success = db_use_coupon(int(user_id))
+        if not success:
+            return jsonify({"error": "not_enough_coupons"}), 400
+        user = db_get_user(int(user_id))
+        return jsonify({"success": True, "coupons": user["coupons"]})
+    except Exception as e:
+        logger.error(f"use_coupon error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/history", methods=["POST"])
 def history():
@@ -258,41 +282,51 @@ def history():
     user_id = data.get("user_id")
     if not user_id:
         return jsonify({"error": "no user_id"}), 400
-    hist = run_async(_get_history(int(user_id)))
-    return jsonify({"history": hist})
+    try:
+        hist = db_get_history(int(user_id))
+        return jsonify({"history": hist})
+    except Exception as e:
+        logger.error(f"history error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/add_stars", methods=["POST"])
-def add_stars_endpoint():
-    """Викликається ботом після Stars платежу"""
+def add_stars():
     secret = request.headers.get("X-Bot-Secret", "")
-    if secret != os.getenv("BOT_SECRET", "nftking2025"):
+    if secret != BOT_SECRET:
         return jsonify({"error": "unauthorized"}), 401
     data = request.json or {}
     user_id = data.get("user_id")
     amount = data.get("amount", 0)
     if not user_id or amount <= 0:
         return jsonify({"error": "invalid params"}), 400
-    run_async(_update_stars(int(user_id), amount))
-    user = run_async(_get_user(int(user_id)))
-    return jsonify({"success": True, "stars": user["stars"]})
+    try:
+        db_get_user(int(user_id))  # ensure user exists
+        stars = db_update_stars(int(user_id), amount)
+        return jsonify({"success": True, "stars": stars})
+    except Exception as e:
+        logger.error(f"add_stars error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/admin/stats", methods=["GET"])
 def admin_stats():
     secret = request.headers.get("X-Bot-Secret", "")
-    if secret != os.getenv("BOT_SECRET", "nftking2025"):
+    if secret != BOT_SECRET:
         return jsonify({"error": "unauthorized"}), 401
-    async def _stats():
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT COUNT(*) FROM users") as c:
-                users = (await c.fetchone())[0]
-            async with db.execute("SELECT COUNT(*) FROM history") as c:
-                cases = (await c.fetchone())[0]
-            async with db.execute("SELECT SUM(stars) FROM users") as c:
-                stars = (await c.fetchone())[0] or 0
-        return {"users": users, "cases": cases, "stars": stars}
-    return jsonify(run_async(_stats()))
-
-run_async(init_db())
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) as cnt FROM users")
+        users = cur.fetchone()["cnt"]
+        cur.execute("SELECT COUNT(*) as cnt FROM history")
+        cases = cur.fetchone()["cnt"]
+        cur.execute("SELECT COALESCE(SUM(stars), 0) as total FROM users")
+        stars = cur.fetchone()["total"]
+        cur.close()
+        conn.close()
+        return jsonify({"users": users, "cases": cases, "stars": stars})
+    except Exception as e:
+        logger.error(f"admin_stats error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
