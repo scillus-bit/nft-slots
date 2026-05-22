@@ -357,35 +357,47 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid user ID!")
         return
 
-    # ── Casino Spins: get COUNT and make direct API call ──
+    # ── Casino Spins: get count ──
     if isinstance(waiting_for.get(user.id), dict) and waiting_for[user.id].get("action") == "adm_casino_spins_count":
         try:
             spins = int(text)
             target_id = waiting_for[user.id]["target_id"]
-            
             del waiting_for[user.id]
-            
-            res = api_call("/api/casino_grant", {"user_id": target_id, "grant": str(spins)}, secret=True)
-            if res.get("success"):
-                await context.bot.send_message(target_id, f"🎰 Тобі додали +{spins} спін(ів) в казино!")
-                await update.message.reply_text(f"✅ Готово! User {target_id} отримав {spins} спінів", reply_markup=admin_kb())
-        except Exception:
-            pass
+            # Send deep link to user — WebApp handles the grant via start_param
+            deep_link = f"https://t.me/{(await context.bot.get_me()).username}?start=casino_{target_id}_{spins}"
+            await update.message.reply_text(
+                f"✅ *Casino Spins Grant*\n\n"
+                f"Send this link to user `{target_id}`:\n`{deep_link}`\n\n"
+                f"Or press the button below to notify them directly:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Notify User", callback_data=f"adm_notify_casino_{target_id}_{spins}")],
+                    [InlineKeyboardButton("◀️ Back", callback_data="adm_back")]
+                ])
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}", reply_markup=admin_kb())
         return
 
-   # ── Casino Unlimited: get user ID and make direct API call ──
+    # ── Casino Unlimited: get user ID ──
     if waiting_for.get(user.id) == "adm_casino_unlimited_id":
         try:
             target_id = int(text)
-            
             del waiting_for[user.id]
-            
-            res = api_call("/api/casino_grant", {"user_id": target_id, "grant": "unlimited"}, secret=True)
-            if res.get("success"):
-                await context.bot.send_message(target_id, "🎰 Тобі дали безліміт спінів в казино на сьогодні!")
-                await update.message.reply_text(f"✅ Готово! User {target_id} — unlimited", reply_markup=admin_kb())
+            bot_info = await context.bot.get_me()
+            deep_link = f"https://t.me/{bot_info.username}?start=casino_{target_id}_unlimited"
+            await update.message.reply_text(
+                f"✅ *Unlimited Casino Grant*\n\n"
+                f"User `{target_id}` will get unlimited spins today.\n\n"
+                f"Link: `{deep_link}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Notify User", callback_data=f"adm_notify_casino_{target_id}_unlimited")],
+                    [InlineKeyboardButton("◀️ Back", callback_data="adm_back")]
+                ])
+            )
         except Exception:
-            pass
+            await update.message.reply_text("❌ Invalid user ID!", reply_markup=admin_kb())
         return
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
