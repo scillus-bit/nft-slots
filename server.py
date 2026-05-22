@@ -292,7 +292,8 @@ def admin_stats():
         return {"users": users, "cases": cases, "stars": stars}
     return jsonify(run_async(_stats()))
 
+run_async(init_db())
+
 if __name__ == "__main__":
-    run_async(init_db())
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
