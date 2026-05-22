@@ -326,7 +326,82 @@ def admin_stats():
     except Exception as e:
         logger.error(f"admin_stats error: {e}")
         return jsonify({"error": str(e)}), 500
-
+@app.route("/api/set_stars", methods=["POST"])
+def set_stars():
+    secret = request.headers.get("X-Bot-Secret", "")
+    if secret != BOT_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.json or {}
+    user_id = data.get("user_id")
+    amount = data.get("amount", 0)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET stars = %s WHERE user_id = %s RETURNING stars", (int(amount), int(user_id)))
+    row = cur.fetchone()
+    conn.commit(); cur.close(); conn.close()
+    return jsonify({"success": True, "stars": row["stars"]})
+    @app.route("/api/casino_grant", methods=["POST"])
+def casino_grant():
+    secret = request.headers.get("X-Bot-Secret", "")
+    if secret != BOT_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.json or {}
+    user_id = data.get("user_id")
+    grant = data.get("grant", "1")
+    today = time.strftime("%Y-%m-%d")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS casino_grants (
+        user_id BIGINT, date TEXT, extra_spins INTEGER DEFAULT 0,
+        unlimited BOOLEAN DEFAULT FALSE, PRIMARY KEY (user_id, date))""")
+    if grant == "unlimited":
+        cur.execute("""INSERT INTO casino_grants VALUES (%s,%s,0,TRUE)
+            ON CONFLICT (user_id,date) DO UPDATE SET unlimited=TRUE""", (int(user_id), today))
+    else:
+        cur.execute("""INSERT INTO casino_grants VALUES (%s,%s,%s,FALSE)
+            ON CONFLICT (user_id,date) DO UPDATE SET extra_spins=casino_grants.extra_spins+%s""",
+            (int(user_id), today, int(grant), int(grant)))
+    conn.commit(); cur.close(); conn.close()
+    return jsonify({"success": True})
+    @app.route("/api/casino_check", methods=["POST"])
+def casino_check():
+    data = request.json or {}
+    user_id = data.get("user_id")
+    today = time.strftime("%Y-%m-%d")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT extra_spins, unlimited FROM casino_grants WHERE user_id=%s AND date=%s", (int(user_id), today))
+    row = cur.fetchone()
+    cur.execute("""CREATE TABLE IF NOT EXISTS casino_spins (
+        user_id BIGINT, date TEXT, spins_used INTEGER DEFAULT 0, PRIMARY KEY(user_id,date))""")
+    cur.execute("SELECT spins_used FROM casino_spins WHERE user_id=%s AND date=%s", (int(user_id), today))
+    spin_row = cur.fetchone()
+    cur.close(); conn.close()
+    extra = row["extra_spins"] if row else 0
+    unlimited = row["unlimited"] if row else False
+    used = spin_row["spins_used"] if spin_row else 0
+    return jsonify({"unlimited": unlimited, "spins_left": 999 if unlimited else max(0, 1+extra-used)})
+    @app.route("/api/casino_spin", methods=["POST"])
+def casino_spin():
+    data = request.json or {}
+    user_id = data.get("user_id")
+    today = time.strftime("%Y-%m-%d")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT extra_spins, unlimited FROM casino_grants WHERE user_id=%s AND date=%s", (int(user_id), today))
+    grant = cur.fetchone()
+    cur.execute("SELECT spins_used FROM casino_spins WHERE user_id=%s AND date=%s", (int(user_id), today))
+    spin_row = cur.fetchone()
+    extra = grant["extra_spins"] if grant else 0
+    unlimited = grant["unlimited"] if grant else False
+    used = spin_row["spins_used"] if spin_row else 0
+    if not unlimited and used >= 1 + extra:
+        cur.close(); conn.close()
+        return jsonify({"error": "limit_reached"}), 403
+    cur.execute("""INSERT INTO casino_spins VALUES (%s,%s,1)
+        ON CONFLICT (user_id,date) DO UPDATE SET spins_used=casino_spins.spins_used+1""", (int(user_id), today))
+    conn.commit(); cur.close(); conn.close()
+    return jsonify({"success": True, "spins_left": 999 if unlimited else max(0, extra-used)})
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
