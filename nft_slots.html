@@ -910,9 +910,13 @@ function spawnParticles() {
     },i*70);
   }
 }
-
 buildCases();
-loadUser();
+if (userId) {
+  loadUser();
+} else {
+  // Fallback якщо не в Telegram
+  console.log("No userId - not in Telegram");
+}
 setInterval(checkDailyStatus,60000);
 </script>
 </body>
