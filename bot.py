@@ -35,7 +35,7 @@ def api_call(endpoint, body, secret=False):
             headers["X-Bot-Secret"] = BOT_SECRET
         r = req.post(f"{API_URL}{endpoint}", json=body, headers=headers, timeout=5)
         return r.json()
-   except Exception as e:
+    except Exception as e:
         print(f"API ERROR: {e}")
         return {}
 
