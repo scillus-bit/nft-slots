@@ -5,7 +5,7 @@ NFT King API Server — PostgreSQL версія
 import os, time, logging, json, hmac, hashlib
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import psycopg2
+import psycopg
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    conn = psycopg.connect(DATABASE_URL, row_factory=psycopg.rows.dict_row)
     return conn
 
 def init_db():
