@@ -982,25 +982,21 @@ function saveCasinoLimit(data) {
   const key = `casino_limit_${userId || 'guest'}`;
   try { localStorage.setItem(key, JSON.stringify(data)); } catch(e) {}
 }
-function canSpin() {
-  const lim = getCasinoLimit();
-  if (lim.unlimited) return true;
-  const totalAllowed = 1 + (lim.extraSpins || 0);
-  return lim.spins < totalAllowed;
+async function canSpin() {
+    if (!userId) return true;
+    const res = await apiCall("/api/casino_check", {});
+    return res && (res.unlimited || res.spins_left > 0);
 }
-function recordSpin() {
-  const lim = getCasinoLimit();
-  if (!lim.unlimited) {
-    lim.spins = (lim.spins || 0) + 1;
-    saveCasinoLimit(lim);
-  }
+
+async function recordSpin() {
+    if (!userId) return;
+    await apiCall("/api/casino_spin", {});
 }
-function getSpinsInfo() {
-  const lim = getCasinoLimit();
-  if (lim.unlimited) return { unlimited: true };
-  const totalAllowed = 1 + (lim.extraSpins || 0);
-  const used = lim.spins || 0;
-  return { unlimited: false, used, total: totalAllowed, left: Math.max(0, totalAllowed - used) };
+
+async function getSpinsInfo() {
+    if (!userId) return { unlimited: false, spins_left: 1 };
+    const res = await apiCall("/api/casino_check", {});
+    return res || { unlimited: false, spins_left: 0 };
 }
 
 // Called from bot via deep link to grant extra spins
